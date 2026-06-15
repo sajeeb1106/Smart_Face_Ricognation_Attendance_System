@@ -16,37 +16,37 @@ os.makedirs(ATT_DIR, exist_ok=True)
 
 # ---------------- GLOBAL ----------------
 encodings = {}
-pending_attendance = {}   # ⬅️ QR scan pending list
+pending_students = set()
 
+session_active = False
+session_subject = ""
+session_start_time = None
+session_duration = timedelta(hours=2)
 
-# ---------------- STUDENT INFO ----------------
-def get_student_info(sid):
+# ---------------- LOAD STUDENTS ----------------
+def load_students():
+    students = []
+
     with open(STUDENTS_FILE, "r") as f:
         reader = csv.reader(f)
         next(reader)
-
         for row in reader:
-            if row[0] == sid:
-                return row[1], row[2]
+            students.append({"id": row[0], "name": row[1], "dept": row[2]})
 
-    return None, None
+    return students
+
+
+STUDENTS = load_students()
 
 
 # ---------------- LOAD ENCODINGS ----------------
 def load_encodings():
     enc = {}
 
-    if not os.path.exists(ENC_DIR):
-        print("❌ Encodings folder missing!")
-        return enc
-
     for file in os.listdir(ENC_DIR):
         if file.endswith(".npy"):
             sid = file.split(".")[0]
-            try:
-                enc[sid] = np.load(f"{ENC_DIR}/{file}")
-            except:
-                print(f"⚠ Error loading: {sid}")
+            enc[sid] = np.load(f"{ENC_DIR}/{file}")
 
     return enc
 
@@ -54,89 +54,114 @@ def load_encodings():
 encodings = load_encodings()
 
 
-# ---------------- ATTENDANCE MARK ----------------
-def mark_attendance(sid, status="Present", custom_time=None):
+# ---------------- SUBJECT FILE ----------------
+def get_subject_file(subject):
+    return os.path.join(ATT_DIR, f"{subject}.csv")
 
-    now = custom_time if custom_time else datetime.now()
 
-    date = now.strftime("%Y-%m-%d")
-    time_str = now.strftime("%H:%M")
+def init_subject_file(subject):
+    file = get_subject_file(subject)
 
-    daily_file = os.path.join(ATT_DIR, f"attendance_{date}.csv")
-
-    # create file
-    if not os.path.exists(daily_file):
-        with open(daily_file, "w", newline="") as f:
+    if not os.path.exists(file):
+        with open(file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["ID", "Date", "Time", "Status"])
+            writer.writerow(["ID", "Name", "Dept"])
 
-    # duplicate check
-    with open(daily_file, "r") as f:
-        reader = csv.reader(f)
-        next(reader)
+            for s in STUDENTS:
+                writer.writerow([s["id"], s["name"], s["dept"]])
 
-        for row in reader:
-            if row and row[0] == sid:
-                print("⚠ Already marked today")
-                return False
+    return file
 
-    # write
-    with open(daily_file, "a", newline="") as f:
+
+# ---------------- ADD SESSION COLUMN ----------------
+def add_session_column(subject):
+    file = get_subject_file(subject)
+
+    session_name = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    rows = []
+
+    with open(file, "r") as f:
+        reader = list(csv.reader(f))
+        header = reader[0]
+        data = reader[1:]
+
+    header.append(session_name)
+
+    for row in data:
+        row.append("Absent")   # default
+
+    rows.append(header)
+    rows.extend(data)
+
+    with open(file, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([sid, date, time_str, status])
+        writer.writerows(rows)
 
-    print(f"✅ Attendance Saved: {status}")
-    return True
-
-
-# ---------------- AUTO ABSENT SYSTEM ----------------
-def auto_absent_checker():
-
-    while True:
-        now = datetime.now()
-
-        to_remove = []
-
-        for sid, scan_time in pending_attendance.items():
-
-            if now - scan_time >= timedelta(hours=3):
-
-                daily_file = os.path.join(
-                    ATT_DIR,
-                    f"attendance_{scan_time.strftime('%Y-%m-%d')}.csv"
-                )
-
-                already = False
-
-                if os.path.exists(daily_file):
-                    with open(daily_file, "r") as f:
-                        reader = csv.reader(f)
-                        next(reader)
-
-                        for row in reader:
-                            if row and row[0] == sid:
-                                already = True
-                                break
-
-                if not already:
-                    mark_attendance(
-                        sid,
-                        status="Absent",
-                        custom_time=scan_time
-                    )
-                    print(f"⛔ AUTO ABSENT: {sid}")
-
-                to_remove.append(sid)
-
-        for sid in to_remove:
-            pending_attendance.pop(sid, None)
-
-        time.sleep(60)  # check every 1 min
+    return session_name
 
 
-# ---------------- QR SCANNER ----------------
+# ---------------- MARK PRESENT ----------------
+def mark_present(subject, sid):
+    file = get_subject_file(subject)
+
+    with open(file, "r") as f:
+        rows = list(csv.reader(f))
+
+    header = rows[0]
+    data = rows[1:]
+
+    if sid not in pending_students:
+        return
+
+    col_index = len(header) - 1  # latest session column
+
+    for row in data:
+        if row[0] == sid:
+            row[col_index] = "Present"
+
+    with open(file, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(data)
+
+
+# ---------------- AUTO ABSENT AFTER 2 HOURS ----------------
+def session_closer(subject, session_start):
+    global session_active, pending_students
+
+    while session_active:
+        if datetime.now() - session_start >= session_duration:
+
+            file = get_subject_file(subject)
+
+            with open(file, "r") as f:
+                rows = list(csv.reader(f))
+
+            header = rows[0]
+            data = rows[1:]
+
+            col_index = len(header) - 1
+
+            for row in data:
+                if row[0] in pending_students:
+                    row[col_index] = "Absent"
+
+            with open(file, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(data)
+
+            print("⛔ SESSION CLOSED (AUTO ABSENT DONE)")
+            session_active = False
+            pending_students.clear()
+            break
+
+        time.sleep(30)
+
+
+# ---------------- QR SCAN ----------------
 def scan_qr():
-
     cam = cv2.VideoCapture(0)
     detector = cv2.QRCodeDetector()
 
@@ -144,17 +169,14 @@ def scan_qr():
 
     while True:
         ret, frame = cam.read()
-
         data, bbox, _ = detector.detectAndDecode(frame)
 
         if data:
             cam.release()
             cv2.destroyAllWindows()
-            print(f"✔ QR Detected: {data}")
             return data
 
         cv2.imshow("QR Scanner", frame)
-
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
@@ -167,69 +189,32 @@ def scan_qr():
 def face_verify(sid):
 
     if sid not in encodings:
-        print("❌ No face data found")
         return False
 
-    known_encoding = encodings[sid]
     cam = cv2.VideoCapture(0)
+    known = encodings[sid]
 
-    print("📸 Face verification started...")
-
-    match_count = 0
-    wrong_count = 0
+    match = 0
 
     while True:
         ret, frame = cam.read()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         faces = face_recognition.face_locations(rgb)
-
-        if len(faces) == 0:
-            cv2.putText(frame, "NO FACE DETECTED", (40, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            cv2.imshow("Face Verify", frame)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-            continue
-
         encs = face_recognition.face_encodings(rgb, faces)
 
         for face in encs:
+            res = face_recognition.compare_faces([known], face, tolerance=0.45)
 
-            result = face_recognition.compare_faces(
-                [known_encoding], face, tolerance=0.45
-            )
-
-            distance = face_recognition.face_distance(
-                [known_encoding], face
-            )[0]
-
-            if result[0] and distance < 0.45:
-                match_count += 1
-                wrong_count = 0
-
-                cv2.putText(frame, "MATCHED", (40, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-                if match_count >= 3:
-                    cam.release()
-                    cv2.destroyAllWindows()
-                    print("✔ FACE VERIFIED")
-                    return True
-
+            if res[0]:
+                match += 1
             else:
-                wrong_count += 1
-                match_count = 0
+                match = 0
 
-                cv2.putText(frame, "NOT MATCHED", (40, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-                if wrong_count >= 10:
-                    cam.release()
-                    cv2.destroyAllWindows()
-                    print("❌ FACE REJECTED")
-                    return False
+            if match >= 3:
+                cam.release()
+                cv2.destroyAllWindows()
+                return True
 
         cv2.imshow("Face Verify", frame)
 
@@ -241,73 +226,39 @@ def face_verify(sid):
     return False
 
 
-# ---------------- STATS ----------------
-def get_stats(sid):
-
-    present = 0
-    total_days = 0
-
-    if not os.path.exists(ATT_DIR):
-        return 0, 0, 0
-
-    for file in os.listdir(ATT_DIR):
-
-        if file.endswith(".csv"):
-            total_days += 1
-
-            with open(os.path.join(ATT_DIR, file), "r") as f:
-                reader = csv.reader(f)
-                next(reader)
-
-                for row in reader:
-                    if row[0] == sid:
-                        if row[3] == "Present":
-                            present += 1
-                        break
-
-    absent = total_days - present
-    percent = (present / total_days * 100) if total_days > 0 else 0
-
-    return present, absent, percent
-
-
 # ---------------- MAIN ----------------
 print("🚀 SYSTEM STARTED")
 
-# START AUTO THREAD
-threading.Thread(target=auto_absent_checker, daemon=True).start()
+subject = input("📘 Enter Subject Name: ")
 
-sid = scan_qr()
+init_subject_file(subject)
 
-if sid:
+session_start_time = datetime.now()
+session_active = True
 
-    pending_attendance[sid] = datetime.now()   # ⬅️ IMPORTANT
+session_name = add_session_column(subject)
 
-    name, dept = get_student_info(sid)
+print(f"📌 Attendance Started for: {subject}")
+print(f"⏳ Session: {session_name} (2 hours)")
 
-    print(f"✔ Student: {name} ({dept})")
+threading.Thread(
+    target=session_closer,
+    args=(subject, session_start_time),
+    daemon=True
+).start()
+
+
+while session_active:
+
+    sid = scan_qr()
+
+    if not sid:
+        continue
+
+    pending_students.add(sid)
 
     if face_verify(sid):
-
-        mark_attendance(sid, status="Present")
-
-        present, absent, percent = get_stats(sid)
-
-        print("\n==============================")
-        print("🎓 ATTENDANCE SUCCESS")
-        print(f"ID: {sid}")
-        print(f"Name: {name}")
-        print(f"Dept: {dept}")
-        print(f"Present: {present}")
-        print(f"Absent: {absent}")
-        print(f"Attendance: {percent:.1f}%")
-        print("==============================\n")
-
-        # remove from pending (important)
-        pending_attendance.pop(sid, None)
-
+        mark_present(subject, sid)
+        print(f"✅ PRESENT: {sid}")
     else:
-        print("❌ Face verification FAILED")
-
-else:
-    print("❌ QR scan FAILED")
+        print(f"❌ FACE FAILED: {sid}")
