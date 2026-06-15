@@ -55,15 +55,21 @@ def init_subject_file(subject):
     if not os.path.exists(file):
         with open(file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["ID", "Name", "Dept"])
+            writer.writerow(["ID", "Name", "Dept", "Percentage"])
             for s in STUDENTS:
-                writer.writerow([s["id"], s["name"], s["dept"]])
+                writer.writerow([s["id"], s["name"], s["dept"], "0.00%"])
 
-# ---------------- SESSION COLUMN ----------------
-def add_session_column(subject):
+# ---------------- CLASS NUMBER ----------------
+def get_next_class_number(header):
+    count = 0
+    for h in header:
+        if h.startswith("Class_"):
+            count += 1
+    return count + 1
+
+# ---------------- PERCENTAGE UPDATE ----------------
+def update_percentage(subject):
     file = get_subject_file(subject)
-
-    session_name = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     with open(file, "r") as f:
         rows = list(csv.reader(f))
@@ -71,15 +77,47 @@ def add_session_column(subject):
     header = rows[0]
     data = rows[1:]
 
-    header.append(session_name)
+    session_cols = header[4:]
+    total = len(session_cols)
 
     for row in data:
-        row.append("Absent")
+        sessions = row[4:]
+        present = sessions.count("Present")
+        percent = (present / total * 100) if total > 0 else 0
+        row[3] = f"{percent:.2f}%"
 
     with open(file, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(header)
         writer.writerows(data)
+
+# ---------------- ADD CLASS COLUMN ----------------
+def add_session_column(subject):
+    file = get_subject_file(subject)
+
+    session_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    with open(file, "r") as f:
+        rows = list(csv.reader(f))
+
+    header = rows[0]
+    data = rows[1:]
+
+    class_no = get_next_class_number(header)
+    session_name = f"Class_{class_no} ({session_time})"
+
+    # insert after Percentage
+    header.insert(4, session_name)
+
+    for row in data:
+        row.insert(4, "Absent")
+
+    with open(file, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(data)
+
+    update_percentage(subject)
 
 # ---------------- MARK PRESENT ----------------
 def mark_present(subject, sid):
@@ -102,7 +140,9 @@ def mark_present(subject, sid):
         writer.writerow(header)
         writer.writerows(data)
 
-# ---------------- SESSION AUTO CLOSE ----------------
+    update_percentage(subject)
+
+# ---------------- SESSION CLOSE ----------------
 def session_closer(subject, start_time):
     global session_active, pending_students
 
@@ -131,7 +171,7 @@ def session_closer(subject, start_time):
 
             session_active = False
             pending_students.clear()
-            print("\n⛔ SESSION CLOSED (2 HOURS DONE)\n")
+            print("\n⛔ SESSION CLOSED\n")
             break
 
         time.sleep(30)
@@ -200,7 +240,7 @@ def face_verify(sid):
     cv2.destroyAllWindows()
     return False
 
-# ---------------- EXCEL EXPORT (FIXED + PERFECT) ----------------
+# ---------------- EXPORT EXCEL ----------------
 def export_to_excel(subject):
 
     file = get_subject_file(subject)
@@ -212,35 +252,16 @@ def export_to_excel(subject):
     header = rows[0]
     data = rows[1:]
 
-    session_cols = header[3:]
-    total_sessions = len(session_cols)
-
     wb = Workbook()
     ws = wb.active
     ws.title = subject
 
-    # HEADER FIX
-    ws.append(["ID", "Name", "Dept"] + session_cols + ["Percentage"])
+    ws.append(header)
 
     for row in data:
-
-        sid = row[0]
-        name = row[1]
-        dept = row[2]
-
-        sessions = row[3:]
-
-        if len(sessions) < total_sessions:
-            sessions += ["Absent"] * (total_sessions - len(sessions))
-
-        present_count = sessions.count("Present")
-
-        percent = (present_count / total_sessions * 100) if total_sessions > 0 else 0
-
-        ws.append([sid, name, dept] + sessions + [f"{percent:.2f}%"])
+        ws.append(row)
 
     wb.save(excel_file)
-
     print(f"\n📁 Excel Saved: {excel_file}")
 
 # ---------------- MAIN ----------------
@@ -275,5 +296,5 @@ while session_active:
     else:
         print(f"❌ FAILED: {sid}")
 
-# ---------------- FINAL EXCEL ----------------
+# ---------------- FINAL ----------------
 export_to_excel(subject)
