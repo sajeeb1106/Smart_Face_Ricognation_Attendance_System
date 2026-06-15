@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta
+from openpyxl import Workbook
 
 # ---------------- FOLDERS ----------------
 ENC_DIR = "encodings"
@@ -16,48 +17,37 @@ os.makedirs(ATT_DIR, exist_ok=True)
 
 # ---------------- GLOBAL ----------------
 encodings = {}
-pending_students = set()
-
 session_active = False
-session_subject = ""
 session_start_time = None
 session_duration = timedelta(hours=2)
+pending_students = set()
 
 # ---------------- LOAD STUDENTS ----------------
 def load_students():
     students = []
-
     with open(STUDENTS_FILE, "r") as f:
         reader = csv.reader(f)
         next(reader)
         for row in reader:
             students.append({"id": row[0], "name": row[1], "dept": row[2]})
-
     return students
 
-
 STUDENTS = load_students()
-
 
 # ---------------- LOAD ENCODINGS ----------------
 def load_encodings():
     enc = {}
-
     for file in os.listdir(ENC_DIR):
         if file.endswith(".npy"):
             sid = file.split(".")[0]
             enc[sid] = np.load(f"{ENC_DIR}/{file}")
-
     return enc
-
 
 encodings = load_encodings()
 
-
-# ---------------- SUBJECT FILE ----------------
+# ---------------- FILE ----------------
 def get_subject_file(subject):
     return os.path.join(ATT_DIR, f"{subject}.csv")
-
 
 def init_subject_file(subject):
     file = get_subject_file(subject)
@@ -66,40 +56,30 @@ def init_subject_file(subject):
         with open(file, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["ID", "Name", "Dept"])
-
             for s in STUDENTS:
                 writer.writerow([s["id"], s["name"], s["dept"]])
 
-    return file
-
-
-# ---------------- ADD SESSION COLUMN ----------------
+# ---------------- SESSION COLUMN ----------------
 def add_session_column(subject):
     file = get_subject_file(subject)
 
     session_name = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    rows = []
-
     with open(file, "r") as f:
-        reader = list(csv.reader(f))
-        header = reader[0]
-        data = reader[1:]
+        rows = list(csv.reader(f))
+
+    header = rows[0]
+    data = rows[1:]
 
     header.append(session_name)
 
     for row in data:
-        row.append("Absent")   # default
-
-    rows.append(header)
-    rows.extend(data)
+        row.append("Absent")
 
     with open(file, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerows(rows)
-
-    return session_name
-
+        writer.writerow(header)
+        writer.writerows(data)
 
 # ---------------- MARK PRESENT ----------------
 def mark_present(subject, sid):
@@ -111,10 +91,7 @@ def mark_present(subject, sid):
     header = rows[0]
     data = rows[1:]
 
-    if sid not in pending_students:
-        return
-
-    col_index = len(header) - 1  # latest session column
+    col_index = len(header) - 1
 
     for row in data:
         if row[0] == sid:
@@ -125,13 +102,13 @@ def mark_present(subject, sid):
         writer.writerow(header)
         writer.writerows(data)
 
-
-# ---------------- AUTO ABSENT AFTER 2 HOURS ----------------
-def session_closer(subject, session_start):
+# ---------------- SESSION AUTO CLOSE ----------------
+def session_closer(subject, start_time):
     global session_active, pending_students
 
     while session_active:
-        if datetime.now() - session_start >= session_duration:
+
+        if datetime.now() - start_time >= session_duration:
 
             file = get_subject_file(subject)
 
@@ -152,24 +129,23 @@ def session_closer(subject, session_start):
                 writer.writerow(header)
                 writer.writerows(data)
 
-            print("⛔ SESSION CLOSED (AUTO ABSENT DONE)")
             session_active = False
             pending_students.clear()
+            print("\n⛔ SESSION CLOSED (2 HOURS DONE)\n")
             break
 
         time.sleep(30)
-
 
 # ---------------- QR SCAN ----------------
 def scan_qr():
     cam = cv2.VideoCapture(0)
     detector = cv2.QRCodeDetector()
 
-    print("📷 Scan QR Code...")
+    print("📷 Scan QR...")
 
     while True:
         ret, frame = cam.read()
-        data, bbox, _ = detector.detectAndDecode(frame)
+        data, _, _ = detector.detectAndDecode(frame)
 
         if data:
             cam.release()
@@ -183,7 +159,6 @@ def scan_qr():
     cam.release()
     cv2.destroyAllWindows()
     return None
-
 
 # ---------------- FACE VERIFY ----------------
 def face_verify(sid):
@@ -225,6 +200,48 @@ def face_verify(sid):
     cv2.destroyAllWindows()
     return False
 
+# ---------------- EXCEL EXPORT (FIXED + PERFECT) ----------------
+def export_to_excel(subject):
+
+    file = get_subject_file(subject)
+    excel_file = f"{subject}_attendance.xlsx"
+
+    with open(file, "r") as f:
+        rows = list(csv.reader(f))
+
+    header = rows[0]
+    data = rows[1:]
+
+    session_cols = header[3:]
+    total_sessions = len(session_cols)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = subject
+
+    # HEADER FIX
+    ws.append(["ID", "Name", "Dept"] + session_cols + ["Percentage"])
+
+    for row in data:
+
+        sid = row[0]
+        name = row[1]
+        dept = row[2]
+
+        sessions = row[3:]
+
+        if len(sessions) < total_sessions:
+            sessions += ["Absent"] * (total_sessions - len(sessions))
+
+        present_count = sessions.count("Present")
+
+        percent = (present_count / total_sessions * 100) if total_sessions > 0 else 0
+
+        ws.append([sid, name, dept] + sessions + [f"{percent:.2f}%"])
+
+    wb.save(excel_file)
+
+    print(f"\n📁 Excel Saved: {excel_file}")
 
 # ---------------- MAIN ----------------
 print("🚀 SYSTEM STARTED")
@@ -232,21 +249,16 @@ print("🚀 SYSTEM STARTED")
 subject = input("📘 Enter Subject Name: ")
 
 init_subject_file(subject)
+add_session_column(subject)
 
-session_start_time = datetime.now()
 session_active = True
-
-session_name = add_session_column(subject)
-
-print(f"📌 Attendance Started for: {subject}")
-print(f"⏳ Session: {session_name} (2 hours)")
+session_start_time = datetime.now()
 
 threading.Thread(
     target=session_closer,
     args=(subject, session_start_time),
     daemon=True
 ).start()
-
 
 while session_active:
 
@@ -261,4 +273,7 @@ while session_active:
         mark_present(subject, sid)
         print(f"✅ PRESENT: {sid}")
     else:
-        print(f"❌ FACE FAILED: {sid}")
+        print(f"❌ FAILED: {sid}")
+
+# ---------------- FINAL EXCEL ----------------
+export_to_excel(subject)
