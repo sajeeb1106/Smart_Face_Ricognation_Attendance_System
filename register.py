@@ -19,7 +19,7 @@ os.makedirs(ENC_DIR, exist_ok=True)
 if not os.path.exists(STUDENTS_FILE):
     with open(STUDENTS_FILE, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["ID", "Name", "Department"])
+        writer.writerow(["ID", "Name", "Department", "Phone"])
 
 # ---------------- CHECK DUPLICATE ----------------
 def is_duplicate(sid):
@@ -78,6 +78,7 @@ def register():
     sid = input("ID: ").strip()
     name = input("Name: ").strip()
     dept = input("Department: ").strip()
+    phone = input("Phone: ").strip()
 
     # 🔥 DUPLICATE CHECK FIX
     if is_duplicate(sid):
@@ -87,7 +88,7 @@ def register():
     # save student
     with open(STUDENTS_FILE, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([sid, name, dept])
+        writer.writerow([sid, name, dept, phone])
 
     generate_qr(sid)
     capture_face(sid)
